@@ -33,12 +33,16 @@ GUEST_TOKEN_URL = os.getenv(
 ).strip()
 MAJOR_LOGIN_URL = os.getenv(
     "FF_MAJOR_LOGIN_URL",
-    "https://loginbp.ggpolarbear.com/MajorLogin",
+    "https://loginbp.ppmainecoonghj.com/MajorLogin",
 ).strip()
 MAJOR_LOGIN_FALLBACK_URLS = [
-    "https://loginbp.ggblueshark.com/MajorLogin",
+    "https://loginbp.ppmainecoonghj.com/MajorLogin",
     "https://loginbp.ggpolarbear.com/MajorLogin",
+    "https://loginbp.ggblueshark.com/MajorLogin",
 ]
+CLIENT_VERSION = os.getenv("FF_CLIENT_VERSION", "1.132.1").strip()
+UNITY_VERSION = os.getenv("FF_UNITY_VERSION", "2018.4.12f1").strip()
+GA_SERVER_VERSION = os.getenv("FF_GA_SERVER_VERSION", "1789534056").strip()
 SUPPORTED_REGIONS = {"IND", "BR", "US", "SAC", "NA", "SG", "RU", "ID", "TW", "VN", "TH", "ME", "PK", "CIS", "BD", "EUROPE"}
 REGION_ALIASES = {"EU": "EUROPE"}
 
@@ -95,6 +99,189 @@ def get_account_credentials(region: str) -> str:
         # SG Primary Global Gateway for BD, ME, PK, CIS, SG, etc.
         return "uid=3692265171&password=A2A5E3C252A35B2BB30698BD1469A759417A68A069CF6980ED959EB01D352E28"
 
+# === OB55 MajorLogin wire helpers ===
+def _encode_varint(value: int) -> bytes:
+    value = int(value)
+    out = bytearray()
+    while value > 0x7F:
+        out.append((value & 0x7F) | 0x80)
+        value >>= 7
+    out.append(value)
+    return bytes(out)
+
+
+def _pb_varint(field: int, value: int) -> bytes:
+    if not value:
+        return b""
+    return _encode_varint((field << 3) | 0) + _encode_varint(value)
+
+
+def _pb_bytes(field: int, value) -> bytes:
+    if value is None:
+        return b""
+    if isinstance(value, str):
+        value = value.encode("utf-8")
+    value = bytes(value)
+    if not value:
+        return b""
+    return _encode_varint((field << 3) | 2) + _encode_varint(len(value)) + value
+
+
+def build_ob55_major_login_payload(open_id: str, access_token: str, guest_uid: str) -> bytes:
+    """Build the fuller OB55 login packet used by current clients.
+
+    The old project only sent fields 22/23/29/99. Current gateways answer that
+    packet with SignError1, so the client/device fields must be present too.
+    """
+    parts = [
+        _pb_bytes(3, "2025-05-29 13:11:47"),
+        _pb_bytes(4, "free fire"),
+        _pb_varint(5, 1),
+        _pb_bytes(7, "1.132.2"),
+        _pb_bytes(8, "Android OS 11 / API-30 (RKQ1.201112.002/eng.realme.20221110.193122)"),
+        _pb_bytes(9, "Handheld"),
+        _pb_bytes(10, "JIO"),
+        _pb_bytes(11, "MOBILE"),
+        _pb_varint(12, 720),
+        _pb_varint(13, 1600),
+        _pb_bytes(15, "ARM Cortex-A73 | 2200 | 4"),
+        _pb_varint(16, 4096),
+        _pb_bytes(17, "Adreno (TM) 610"),
+        _pb_bytes(18, "OpenGL ES 3.2"),
+        _pb_bytes(19, str(guest_uid)),
+        _pb_bytes(20, "182.75.115.22"),
+        _pb_bytes(21, "en"),
+        _pb_bytes(22, open_id),
+        _pb_varint(23, 4),
+        _pb_bytes(24, "Handheld"),
+        _pb_bytes(25, "realme RMX1825"),
+        _pb_bytes(26, "280"),
+        _pb_bytes(29, access_token),
+        _pb_varint(60, 30000),
+        _pb_varint(61, 27500),
+        _pb_varint(62, 1940),
+        _pb_varint(63, 720),
+        _pb_varint(64, 28000),
+        _pb_varint(65, 30000),
+        _pb_varint(66, 28000),
+        _pb_varint(67, 30000),
+        _pb_varint(70, 4),
+        _pb_varint(73, 2),
+        _pb_bytes(74, "/data/app/com.dts.freefireth-XaT5M7jRwEL-nPaKOQvqdg==/lib/arm"),
+        _pb_varint(76, 1),
+        _pb_bytes(77, "2f4a7f349f3a3ea581fc4d803bc5a977|/data/app/com.dts.freefireth-XaT5M7jRwEL-nPaKOQvqdg==/base.apk"),
+        _pb_varint(78, 6),
+        _pb_varint(79, 1),
+        _pb_bytes(81, "64"),
+        _pb_bytes(83, "2022041388"),
+        _pb_varint(85, 1),
+        _pb_bytes(86, "OpenGLES3"),
+        _pb_varint(87, 16383),
+        _pb_varint(88, 4),
+        _pb_bytes(89, b"\x10U\x15\x03\x02\x09\x0dPYN\x09EX\x03AZO9X\x07\x0dU\x0aiZPVj\x05\x0dm\x09\x04c"),
+        _pb_varint(92, 8999),
+        _pb_bytes(93, "3rd_party"),
+        _pb_bytes(94, "Jp2DT7F3Is55K/92LSJ4PWkJxZnMzSNn+HEBK2AFBDBdrLpWTA3bZjtbU3JbXigkIFFJ5ZJKi0fpnlJCPDD2A7h2aPQ="),
+        _pb_varint(95, 64000),
+        _pb_varint(97, 1),
+        _pb_varint(98, 1),
+        _pb_bytes(99, "4"),
+        _pb_bytes(100, b"4"),
+    ]
+    return aes_cbc_encrypt(MAIN_KEY, MAIN_IV, b"".join(parts))
+
+
+def _read_wire_varint(buf: bytes, pos: int):
+    result = 0
+    shift = 0
+    while pos < len(buf):
+        b = buf[pos]
+        pos += 1
+        result |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return result, pos
+        shift += 7
+        if shift > 70:
+            break
+    raise ValueError("invalid varint")
+
+
+def _parse_wire_fields(buf: bytes):
+    fields = defaultdict(list)
+    pos = 0
+    while pos < len(buf):
+        tag, pos = _read_wire_varint(buf, pos)
+        field = tag >> 3
+        wire = tag & 7
+        if field <= 0:
+            raise ValueError("invalid protobuf field")
+        if wire == 0:
+            value, pos = _read_wire_varint(buf, pos)
+            fields[field].append(value)
+        elif wire == 1:
+            if pos + 8 > len(buf):
+                raise ValueError("truncated fixed64")
+            fields[field].append(buf[pos:pos + 8])
+            pos += 8
+        elif wire == 2:
+            length, pos = _read_wire_varint(buf, pos)
+            if length < 0 or pos + length > len(buf):
+                raise ValueError("truncated length-delimited field")
+            value = buf[pos:pos + length]
+            pos += length
+            fields[field].append(value)
+        elif wire == 5:
+            if pos + 4 > len(buf):
+                raise ValueError("truncated fixed32")
+            fields[field].append(buf[pos:pos + 4])
+            pos += 4
+        else:
+            raise ValueError(f"unsupported wire type {wire}")
+    return fields
+
+
+def decode_major_login_wire(raw: bytes):
+    """Decode token/region/server URL even when the response has a signature prefix."""
+    if not raw:
+        raise ValueError("empty response")
+
+    offsets = [0]
+    if len(raw) > 64:
+        offsets.append(64)
+    offsets.extend(i for i in range(1, min(128, len(raw))) if i != 64)
+
+    for offset in offsets:
+        try:
+            fields = _parse_wire_fields(raw[offset:])
+        except Exception:
+            continue
+
+        def as_text(field_no):
+            for value in fields.get(field_no, []):
+                if isinstance(value, (bytes, bytearray)):
+                    try:
+                        return bytes(value).decode("utf-8")
+                    except UnicodeDecodeError:
+                        continue
+            return ""
+
+        token = as_text(8)
+        server_url = as_text(10)
+        region = as_text(2)
+        ttl_values = fields.get(9, [])
+        ttl = ttl_values[0] if ttl_values and isinstance(ttl_values[0], int) else 25200
+
+        if token.startswith("eyJ") and server_url:
+            return {
+                "token": token,
+                "serverUrl": server_url,
+                "lockRegion": region,
+                "ttl": ttl,
+            }
+
+    raise ValueError("MajorLogin response did not contain a recognizable token/server URL")
+
+
 # === Token Generation ===
 async def get_access_token(account: str):
     payload = account + "&response_type=token&client_type=2&client_secret=2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3&client_id=100067"
@@ -122,27 +309,22 @@ async def create_jwt(region: str):
     try:
         account = get_account_credentials(region)
         token_val, open_id = await get_access_token(account)
-        body = json.dumps({"open_id": open_id, "open_id_type": "4", "login_token": token_val, "orign_platform_type": "4"})
-        proto_bytes = await json_to_proto(body, FreeFire_pb2.LoginReq())
-        payload = aes_cbc_encrypt(MAIN_KEY, MAIN_IV, proto_bytes)
+        guest_uid = account.split("&", 1)[0].split("=", 1)[1]
+        payload = build_ob55_major_login_payload(open_id, token_val, guest_uid)
 
-        # Current MajorLogin expects the Authorization header to be present even
-        # though the access token is also carried inside the encrypted protobuf.
         headers = {
-            'User-Agent': USERAGENT,
+            'User-Agent': f"UnityPlayer/{UNITY_VERSION} (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
+            'Accept': "*/*",
             'Connection': "Keep-Alive",
-            'Accept-Encoding': "gzip",
-            'Content-Type': "application/octet-stream",
-            'Expect': "100-continue",
-            'Authorization': "Bearer",
-            'X-Unity-Version': "2018.4.11f1",
-            'X-GA': "v1 1",
+            'Accept-Encoding': "deflate, gzip",
+            'X-Ga-Sv': GA_SERVER_VERSION,
+            'Authorization': "Bearer ",
+            'X-Ga': "v1 1",
             'ReleaseVersion': RELEASEVERSION,
+            'Content-Type': "application/x-www-form-urlencoded",
+            'X-Unity-Version': UNITY_VERSION,
         }
 
-        # Garena has more than one login gateway in circulation. Try the
-        # configured URL first, then the two known current gateways. This also
-        # avoids treating a gateway-specific 400/503 as an invalid player UID.
         login_urls = []
         for candidate in [MAJOR_LOGIN_URL, *MAJOR_LOGIN_FALLBACK_URLS]:
             if candidate and candidate not in login_urls:
@@ -150,7 +332,7 @@ async def create_jwt(region: str):
 
         failures = []
         msg = None
-        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             for login_url in login_urls:
                 try:
                     resp = await client.post(login_url, data=payload, headers=headers)
@@ -159,43 +341,32 @@ async def create_jwt(region: str):
                     continue
 
                 if resp.status_code < 200 or resp.status_code >= 300:
-                    body_preview = resp.text.strip().replace("\n", " ")[:120] if resp.content else ""
+                    body_preview = resp.text.strip().replace("\n", " ")[:140] if resp.content else ""
                     detail = f"HTTP {resp.status_code}"
                     if body_preview:
                         detail += f" ({body_preview})"
                     failures.append(f"{login_url}: {detail}")
                     continue
 
-                if not resp.content:
-                    failures.append(f"{login_url}: empty response")
-                    continue
-
                 try:
-                    decoded = decode_protobuf(resp.content, FreeFire_pb2.LoginRes)
-                    candidate_msg = json.loads(json_format.MessageToJson(decoded))
-                except Exception as exc:
-                    failures.append(
-                        f"{login_url}: decode failed ({_short_upstream_error(exc)})"
-                    )
-                    continue
-
-                if candidate_msg.get('token') and candidate_msg.get('serverUrl'):
-                    msg = candidate_msg
+                    msg = decode_major_login_wire(resp.content)
                     break
-
-                failures.append(f"{login_url}: response missing token/serverUrl")
+                except Exception as exc:
+                    failures.append(f"{login_url}: decode failed ({_short_upstream_error(exc)})")
 
         if msg is None:
             detail = "; ".join(failures[:3]) or "no MajorLogin gateway succeeded"
             raise UpstreamAPIError(f"MajorLogin failed for {region}: {detail}")
 
-        token = msg.get('token')
-        server_url = msg.get('serverUrl')
+        ttl = int(msg.get('ttl') or 25200)
+        if ttl < 300 or ttl > 86400:
+            ttl = 25200
+
         cached_tokens[region] = {
-            'token': f"Bearer {token}",
-            'region': msg.get('lockRegion', region),
-            'server_url': server_url,
-            'expires_at': time.time() + 25200,
+            'token': f"Bearer {msg['token']}",
+            'region': msg.get('lockRegion') or region,
+            'server_url': msg['serverUrl'],
+            'expires_at': time.time() + ttl,
         }
     except Exception as exc:
         print(f"Error fetching token for region {region}: {_short_upstream_error(exc)}")
@@ -417,6 +588,8 @@ def health():
         "majorLoginFallbackHosts": [
             u.split("/", 3)[2] if "://" in u else u for u in MAJOR_LOGIN_FALLBACK_URLS
         ],
+        "clientVersion": CLIENT_VERSION,
+        "unityVersion": UNITY_VERSION,
     }), 200
 
 @app.route('/refresh', methods=['GET','POST'])
