@@ -35,6 +35,10 @@ MAJOR_LOGIN_URL = os.getenv(
     "FF_MAJOR_LOGIN_URL",
     "https://loginbp.ggpolarbear.com/MajorLogin",
 ).strip()
+MAJOR_LOGIN_FALLBACK_URLS = [
+    "https://loginbp.ggblueshark.com/MajorLogin",
+    "https://loginbp.ggpolarbear.com/MajorLogin",
+]
 SUPPORTED_REGIONS = {"IND", "BR", "US", "SAC", "NA", "SG", "RU", "ID", "TW", "VN", "TH", "ME", "PK", "CIS", "BD", "EUROPE"}
 REGION_ALIASES = {"EU": "EUROPE"}
 
@@ -121,36 +125,72 @@ async def create_jwt(region: str):
         body = json.dumps({"open_id": open_id, "open_id_type": "4", "login_token": token_val, "orign_platform_type": "4"})
         proto_bytes = await json_to_proto(body, FreeFire_pb2.LoginReq())
         payload = aes_cbc_encrypt(MAIN_KEY, MAIN_IV, proto_bytes)
+
+        # Current MajorLogin expects the Authorization header to be present even
+        # though the access token is also carried inside the encrypted protobuf.
         headers = {
             'User-Agent': USERAGENT,
             'Connection': "Keep-Alive",
             'Accept-Encoding': "gzip",
             'Content-Type': "application/octet-stream",
             'Expect': "100-continue",
+            'Authorization': "Bearer",
             'X-Unity-Version': "2018.4.11f1",
             'X-GA': "v1 1",
             'ReleaseVersion': RELEASEVERSION,
         }
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(MAJOR_LOGIN_URL, data=payload, headers=headers)
-            if resp.status_code < 200 or resp.status_code >= 300:
-                raise UpstreamAPIError(f"MajorLogin returned HTTP {resp.status_code}.")
-            if not resp.content:
-                raise UpstreamAPIError("MajorLogin returned an empty response.")
 
-        try:
-            decoded = decode_protobuf(resp.content, FreeFire_pb2.LoginRes)
-            msg = json.loads(json_format.MessageToJson(decoded))
-        except Exception as exc:
-            raise UpstreamAPIError(
-                f"MajorLogin response could not be decoded for {RELEASEVERSION}: {_short_upstream_error(exc)}"
-            ) from exc
+        # Garena has more than one login gateway in circulation. Try the
+        # configured URL first, then the two known current gateways. This also
+        # avoids treating a gateway-specific 400/503 as an invalid player UID.
+        login_urls = []
+        for candidate in [MAJOR_LOGIN_URL, *MAJOR_LOGIN_FALLBACK_URLS]:
+            if candidate and candidate not in login_urls:
+                login_urls.append(candidate)
+
+        failures = []
+        msg = None
+        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+            for login_url in login_urls:
+                try:
+                    resp = await client.post(login_url, data=payload, headers=headers)
+                except httpx.HTTPError as exc:
+                    failures.append(f"{login_url}: {_short_upstream_error(exc)}")
+                    continue
+
+                if resp.status_code < 200 or resp.status_code >= 300:
+                    body_preview = resp.text.strip().replace("\n", " ")[:120] if resp.content else ""
+                    detail = f"HTTP {resp.status_code}"
+                    if body_preview:
+                        detail += f" ({body_preview})"
+                    failures.append(f"{login_url}: {detail}")
+                    continue
+
+                if not resp.content:
+                    failures.append(f"{login_url}: empty response")
+                    continue
+
+                try:
+                    decoded = decode_protobuf(resp.content, FreeFire_pb2.LoginRes)
+                    candidate_msg = json.loads(json_format.MessageToJson(decoded))
+                except Exception as exc:
+                    failures.append(
+                        f"{login_url}: decode failed ({_short_upstream_error(exc)})"
+                    )
+                    continue
+
+                if candidate_msg.get('token') and candidate_msg.get('serverUrl'):
+                    msg = candidate_msg
+                    break
+
+                failures.append(f"{login_url}: response missing token/serverUrl")
+
+        if msg is None:
+            detail = "; ".join(failures[:3]) or "no MajorLogin gateway succeeded"
+            raise UpstreamAPIError(f"MajorLogin failed for {region}: {detail}")
 
         token = msg.get('token')
         server_url = msg.get('serverUrl')
-        if not token or not server_url:
-            raise UpstreamAPIError("MajorLogin response did not contain token/serverUrl.")
-
         cached_tokens[region] = {
             'token': f"Bearer {token}",
             'region': msg.get('lockRegion', region),
@@ -374,6 +414,9 @@ def health():
         "status": "ok",
         "releaseVersion": RELEASEVERSION,
         "majorLoginHost": MAJOR_LOGIN_URL.split("/", 3)[2] if "://" in MAJOR_LOGIN_URL else MAJOR_LOGIN_URL,
+        "majorLoginFallbackHosts": [
+            u.split("/", 3)[2] if "://" in u else u for u in MAJOR_LOGIN_FALLBACK_URLS
+        ],
     }), 200
 
 @app.route('/refresh', methods=['GET','POST'])
