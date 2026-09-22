@@ -137,7 +137,7 @@ def build_ob55_major_login_payload(open_id: str, access_token: str, guest_uid: s
         _pb_bytes(3, "2025-05-29 13:11:47"),
         _pb_bytes(4, "free fire"),
         _pb_varint(5, 1),
-        _pb_bytes(7, "1.132.2"),
+        _pb_bytes(7, CLIENT_VERSION),
         _pb_bytes(8, "Android OS 11 / API-30 (RKQ1.201112.002/eng.realme.20221110.193122)"),
         _pb_bytes(9, "Handheld"),
         _pb_bytes(10, "JIO"),
@@ -289,7 +289,7 @@ async def get_access_token(account: str):
         'User-Agent': USERAGENT,
         'Connection': "Keep-Alive",
         'Accept-Encoding': "gzip",
-        'Content-Type': "application/x-www-form-urlencoded",
+        'Content-Type': "application/octet-stream",
     }
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -318,7 +318,7 @@ async def create_jwt(region: str):
             'Connection': "Keep-Alive",
             'Accept-Encoding': "deflate, gzip",
             'X-Ga-Sv': GA_SERVER_VERSION,
-            'Authorization': "Bearer ",
+            'Authorization': "Bearer",
             'X-Ga': "v1 1",
             'ReleaseVersion': RELEASEVERSION,
             'Content-Type': "application/x-www-form-urlencoded",
