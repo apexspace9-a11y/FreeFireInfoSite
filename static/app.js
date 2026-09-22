@@ -355,7 +355,7 @@ async function handleSearch(event) {
         document.getElementById('val-bio').textContent = social.signature || 'N/A';
 
         // 2. ACCOUNT ACTIVITY
-        document.getElementById('val-rel-ver').textContent = basic.releaseVersion || 'OB54';
+        document.getElementById('val-rel-ver').textContent = basic.releaseVersion || 'OB55';
         document.getElementById('val-br-pts').textContent = formatNumber(basic.rankingPoints);
         document.getElementById('val-br-max').textContent = basic.maxRank ? `${basic.maxRank}` : 'N/A';
         document.getElementById('val-cs-pts').textContent = formatNumber(basic.csRankingPoints);
