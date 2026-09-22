@@ -29,7 +29,17 @@ RELEASEVERSION = os.getenv("FF_RELEASE_VERSION", "OB55").strip().upper()
 USERAGENT = "Dalvik/2.1.0 (Linux; U; Android 13; CPH2095 Build/RKQ1.211119.001)"
 GUEST_TOKEN_URL = os.getenv(
     "FF_GUEST_TOKEN_URL",
+    "https://ffmconnect.live.gop.garenanow.com/api/v2/oauth/guest/token:grant",
+).strip()
+GUEST_TOKEN_V1_URL = os.getenv(
+    "FF_GUEST_TOKEN_V1_URL",
     "https://ffmconnect.live.gop.garenanow.com/oauth/guest/token/grant",
+).strip()
+GARENA_CLIENT_ID = "100067"
+GARENA_CLIENT_SECRET = "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3"
+GARENA_OAUTH_UA = os.getenv(
+    "FF_GARENA_OAUTH_UA",
+    "GarenaMSDK/4.0.19P10(I2404 ;Android 15;en;US;)",
 ).strip()
 MAJOR_LOGIN_URL = os.getenv(
     "FF_MAJOR_LOGIN_URL",
@@ -284,26 +294,104 @@ def decode_major_login_wire(raw: bytes):
 
 # === Token Generation ===
 async def get_access_token(account: str):
-    payload = account + "&response_type=token&client_type=2&client_secret=2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3&client_id=100067"
-    headers = {
-        'User-Agent': USERAGENT,
-        'Connection': "Keep-Alive",
-        'Accept-Encoding': "gzip",
-        'Content-Type': "application/octet-stream",
-    }
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(GUEST_TOKEN_URL, data=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        raise UpstreamAPIError(f"Guest token request failed: {_short_upstream_error(exc)}") from exc
+    # account is stored as uid=...&password=...
+    values = {}
+    for pair in account.split("&"):
+        if "=" in pair:
+            key, value = pair.split("=", 1)
+            values[key] = value
 
-    token_val = data.get("access_token")
-    open_id = data.get("open_id")
-    if not token_val or not open_id:
-        raise UpstreamAPIError("Guest token response did not include access_token/open_id.")
-    return token_val, open_id
+    uid = values.get("uid", "").strip()
+    password = values.get("password", "").strip()
+    if not uid or not password:
+        raise UpstreamAPIError("Guest credential is missing uid/password.")
+
+    # OB55 clients use the v2 JSON token endpoint. Its success payload is
+    # usually nested under {"data": {...}}, unlike the older v1 endpoint.
+    v2_headers = {
+        "User-Agent": GARENA_OAUTH_UA,
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept": "application/json",
+    }
+    v2_payload = {
+        "client_id": int(GARENA_CLIENT_ID),
+        "client_secret": GARENA_CLIENT_SECRET,
+        "client_type": 2,
+        "password": password,
+        "response_type": "token",
+        "uid": int(uid),
+    }
+
+    errors = []
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        try:
+            resp = await client.post(GUEST_TOKEN_URL, json=v2_payload, headers=v2_headers)
+            if 200 <= resp.status_code < 300:
+                try:
+                    raw = resp.json()
+                    data = raw.get("data", raw) if isinstance(raw, dict) else {}
+                except ValueError:
+                    data = {}
+
+                token_val = data.get("access_token") if isinstance(data, dict) else None
+                open_id = data.get("open_id") if isinstance(data, dict) else None
+                if token_val and open_id:
+                    return token_val, open_id
+
+                error_code = ""
+                if isinstance(data, dict):
+                    error_code = data.get("error") or data.get("error_code") or data.get("message") or ""
+                if not error_code and isinstance(raw, dict):
+                    error_code = raw.get("error") or raw.get("error_code") or raw.get("message") or ""
+                errors.append(f"OAuth v2 returned no token{f' ({error_code})' if error_code else ''}")
+            else:
+                preview = resp.text.strip().replace("\n", " ")[:120]
+                errors.append(f"OAuth v2 HTTP {resp.status_code}{f' ({preview})' if preview else ''}")
+        except Exception as exc:
+            errors.append(f"OAuth v2 failed: {_short_upstream_error(exc)}")
+
+        # Fallback for older/region-specific Garena behavior.
+        v1_headers = {
+            "User-Agent": GARENA_OAUTH_UA,
+            "Connection": "Keep-Alive",
+            "Accept-Encoding": "gzip",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        v1_payload = {
+            "uid": uid,
+            "password": password,
+            "response_type": "token",
+            "client_type": "2",
+            "client_secret": GARENA_CLIENT_SECRET,
+            "client_id": GARENA_CLIENT_ID,
+        }
+        try:
+            resp = await client.post(GUEST_TOKEN_V1_URL, data=v1_payload, headers=v1_headers)
+            if 200 <= resp.status_code < 300:
+                try:
+                    raw = resp.json()
+                    data = raw.get("data", raw) if isinstance(raw, dict) else {}
+                except ValueError:
+                    data = {}
+
+                token_val = data.get("access_token") if isinstance(data, dict) else None
+                open_id = data.get("open_id") if isinstance(data, dict) else None
+                if token_val and open_id:
+                    return token_val, open_id
+
+                error_code = ""
+                if isinstance(data, dict):
+                    error_code = data.get("error") or data.get("error_code") or data.get("message") or ""
+                if not error_code and isinstance(raw, dict):
+                    error_code = raw.get("error") or raw.get("error_code") or raw.get("message") or ""
+                errors.append(f"OAuth v1 returned no token{f' ({error_code})' if error_code else ''}")
+            else:
+                preview = resp.text.strip().replace("\n", " ")[:120]
+                errors.append(f"OAuth v1 HTTP {resp.status_code}{f' ({preview})' if preview else ''}")
+        except Exception as exc:
+            errors.append(f"OAuth v1 failed: {_short_upstream_error(exc)}")
+
+    raise UpstreamAPIError("; ".join(errors[:2]) or "Guest OAuth failed.")
 
 async def create_jwt(region: str):
     try:
@@ -584,6 +672,7 @@ def health():
     return jsonify({
         "status": "ok",
         "releaseVersion": RELEASEVERSION,
+        "guestTokenMode": "v2-with-v1-fallback",
         "majorLoginHost": MAJOR_LOGIN_URL.split("/", 3)[2] if "://" in MAJOR_LOGIN_URL else MAJOR_LOGIN_URL,
         "majorLoginFallbackHosts": [
             u.split("/", 3)[2] if "://" in u else u for u in MAJOR_LOGIN_FALLBACK_URLS
